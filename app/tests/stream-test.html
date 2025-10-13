@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Streaming Agent Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 20px auto; padding: 0 20px; }
+    input { width: 70%; padding: 8px; margin-right: 10px; }
+    button { padding: 8px 16px; }
+    #output { 
+      margin-top: 20px; 
+      padding: 15px; 
+      background: #f5f5f5; 
+      border-radius: 6px;
+      white-space: pre-wrap;
+      font-family: monospace;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h2>Financial Agent Streaming Test</h2>
+  <input id="query" value="What is AAPL's P/E ratio?" />
+  <button onclick="startStream()">Send & Stream</button>
+  <div id="output">Click "Send & Stream" to begin...</div>
+
+  <script>
+    async function startStream() {
+      const query = document.getElementById('query').value;
+      const output = document.getElementById('output');
+      output.innerHTML = '📡 Connecting...\n';
+
+      try {
+        const response = await fetch('http://localhost:8000/ask-session-stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: query })
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            output.innerHTML += '\n✅ Stream completed.\n';
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop(); // Keep incomplete line
+
+          for (const line of lines) {
+            if (line.startsWith(' ')) {
+              try {
+                // ✅ FIX: slice(1) to remove leading space
+                const event = JSON.parse(line.slice(1));
+                output.innerHTML += JSON.stringify(event, null, 2) + '\n\n';
+                
+                // Optional: auto-scroll
+                output.scrollTop = output.scrollHeight;
+              } catch (e) {
+                output.innerHTML += `⚠️ Parse error: ${e.message}\nRaw: ${line}\n\n`;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        output.innerHTML += `❌ Error: ${err.message}\n`;
+        console.error("Stream error:", err);
+      }
+    }
+  </script>
+</body>
+</html>
