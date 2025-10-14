@@ -3,6 +3,8 @@
 Lightweight, stateful financial analysis agent using LLMs + RAG (retrieval-augmented generation).  
 It rewrites conversational queries, analyzes intent, conditionally fetches market data, news, or documents, and returns streaming answers via a FastAPI SSE endpoint.
 
+![Alt text](FinInsightBot_Workflows.drawio.png)
+
 ## Key features
 - Stateful conversational agent (Pydantic state model)
 - Query rewriting & intent analysis (LLM-based)
