@@ -57,13 +57,15 @@ def resolve_query_with_history(state: FinancialAgentState) -> Dict[str, Any]:
         (
             "system", 
             """You are an expert query rewriter for financial analysis. 
-            Your task is to rewrite the user's current query into a clear, standalone, and unambiguous question by incorporating relevant context from the conversation history.
+            Your task is to rewrite the user's current query into a clear, standalone, and unambiguous question by incorporating ONLY the necessary context from the conversation history.
 
-            Guidelines:
-            - Resolve pronouns like "it", "its", "they", "them" to the specific company or ticker mentioned earlier.
-            - If the user refers to "the stock", "the company", or similar, replace it with the actual company name or ticker.
-            - Keep the rewritten query concise and natural.
-            - Only output the rewritten query. Do not add explanations, prefixes, or markdown."""
+            **CRITICAL RULES:**
+            1. **Pronoun Resolution**: If the current query uses pronouns (it, its, they, them, these, those), replace them with the company/ticker from the MOST RECENT relevant mention.
+            2. **Company Switching**: If the user mentions a NEW company name, this is a NEW query topic. DO NOT mix context from previous companies.
+            3. **Multiple Companies**: ONLY preserve multiple companies if the current query uses plural pronouns (they, them, these, those) AND refers to companies mentioned together in the same previous query.
+            4. **Complete Queries**: If the current query is already complete and specific (mentions company names explicitly), return it as-is or with minimal clarification.
+            5. **Context Boundary**: Don't mix attributes from different queries. If the previous query asked about "Tesla's 10K" and current asks "What about Alibaba?", rewrite as "What about Alibaba?" NOT "What about Alibaba's 10K?".
+            """
         ),
         (
             "human", 
@@ -119,7 +121,7 @@ def analyze_user_query(state: FinancialAgentState) -> Dict[str, Any]:
     # Return analysis results with proper key mapping
     return {
         "is_financial": analysis.get("is_financial", False),
-        "ticker": analysis.get("ticker_symbols", []),  # Map ticker_symbols -> ticker
+        "ticker": analysis.get("ticker", []),  # Get ticker directly - analyzer returns "ticker" not "ticker_symbols"
         "needs_fundamental": analysis.get("needs_fundamental", False),
         "needs_technical": analysis.get("needs_technical", False),
         "needs_news": analysis.get("needs_news", False),

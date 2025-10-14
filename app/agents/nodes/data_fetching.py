@@ -37,6 +37,8 @@ def fetch_fundamental_data(state: FinancialAgentState) -> Dict[str, Any]:
     for ticker in state.ticker:
         data = get_fundamental_data(ticker)
         all_data[ticker] = data
+
+    print("Fundamental data fetched:", all_data)
     
     return {"fundamental_data": all_data}
 

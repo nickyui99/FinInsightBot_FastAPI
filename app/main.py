@@ -88,12 +88,13 @@ async def ask_with_session_stream(request: SessionRequest):
                         yield ' {"type": "status", "step": "analyzing_query"}\n\n'
                         ticker = updates.get("ticker")
                         if ticker:
-                            ticker_str = ticker[0] if isinstance(ticker, list) and ticker else None
-                            if ticker_str:
-                                yield f' {{"type": "data", "ticker": "{ticker_str}"}}\n\n'
+                            # Send all tickers as a JSON array instead of just the first one
+                            ticker_list_json = json.dumps(ticker if isinstance(ticker, list) else [ticker])
+                            yield f' {{"type": "data", "ticker": {ticker_list_json}}}\n\n'
                     elif node_name == "retrieve_docs":
                         yield ' {"type": "status", "step": "retrieving_documents"}\n\n'
                     elif node_name == "fetch_fundamental":
+                        print("Fundamental data fetched:", updates.get("fundamental_data"))
                         yield ' {"type": "status", "step": "fetching_fundamental_data"}\n\n'
                     elif node_name == "fetch_technical":
                         yield ' {"type": "status", "step": "fetching_technical_data"}\n\n'
@@ -105,7 +106,8 @@ async def ask_with_session_stream(request: SessionRequest):
             sessions[session_id].update(current_state)
             final_answer = current_state.get("answer", "").strip()
             ticker_list = current_state.get("ticker", [])
-            ticker = ticker_list[0] if ticker_list else None
+            # Send all tickers as an array instead of just the first one
+            tickers = ticker_list if ticker_list else []
 
             fund_data = current_state.get("fundamental_data", {})
             tech_data = current_state.get("technical_data", {})
@@ -115,7 +117,7 @@ async def ask_with_session_stream(request: SessionRequest):
             if tech_data:
                 market_data["technical"] = tech_data
 
-            yield f' {{"type": "done", "answer": {json.dumps(final_answer)}, "ticker": {json.dumps(ticker)}, "market_data": {json.dumps(market_data)}}}\n\n'
+            yield f' {{"type": "done", "answer": {json.dumps(final_answer)}, "ticker": {json.dumps(tickers)}, "market_data": {json.dumps(market_data)}}}\n\n'
 
         except Exception as e:
             error_msg = str(e).replace('"', '\\"').replace('\n', ' ')
