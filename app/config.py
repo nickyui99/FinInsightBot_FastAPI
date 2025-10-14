@@ -35,7 +35,7 @@ class Config:
     
     # API Keys
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    SERP_API_KEY = os.getenv("SERP_API_KEY_1")
+    SERP_API_KEY = os.getenv("SERP_API_KEY_2")
     
     # Session Configuration
     SESSION_TTL_MINUTES = int(os.getenv("SESSION_TTL_MINUTES", "30"))
