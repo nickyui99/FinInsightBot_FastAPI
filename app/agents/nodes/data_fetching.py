@@ -9,7 +9,8 @@ Contains functions for:
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
+import re
 from agents.financial_agent_state import FinancialAgentState
 from clients.yfinance_client import get_fundamental_data, get_technical_data
 from agents.news_retrieval_agent import get_news_retriever, generate_news_queries
@@ -141,12 +142,42 @@ def fetch_news(state: FinancialAgentState) -> Dict[str, Any]:
         logger.error(f"News retrieval failed: {str(e)}", exc_info=True)
         return {"news_articles": []}
 
+def _extract_year(text: str) -> str | None:
+    match = re.search(r"\b(20\d{2}|19\d{2})\b", text)
+    return match.group(1) if match else None
+
+
+def _section_score(title: str) -> int:
+    """Heuristic scores to prefer informative 10-K sections."""
+    if not title:
+        return 0
+    t = title.lower()
+    # High-value sections
+    if any(key in t for key in [
+        "item 7", "management's discussion", "managements discussion", "md&a",
+        "item 1a", "risk factors",
+        "item 1:", "item 1.", "business",
+        "item 7a", "quantitative and qualitative",
+        "item 8", "financial statements"
+    ]):
+        return 3
+    # Neutral
+    if any(key in t for key in ["item 2", "properties", "legal proceedings", "market for"]):
+        return 1
+    # Low-value (signatures, index only, exhibits)
+    if any(key in t for key in ["signatures", "index", "exhibit", "controls and procedures"]):
+        return -2
+    # Default
+    return 0
+
+
+def _rerank_docs(docs: List[Any]) -> List[Any]:
+    return sorted(docs, key=lambda d: _section_score(d.metadata.get("section_title", "")), reverse=True)
+
+
 def retrieve_documents(state: FinancialAgentState) -> Dict[str, Any]:
     """
-    Retrieve SEC filing documents from database.
-    
-    Gets 10-K, 10-Q reports and other financial disclosures
-    filtered by requested tickers.
+    Retrieve SEC filing documents from database using the user's query.
     
     Args:
         state: Agent state with tickers and requirements
@@ -154,20 +185,100 @@ def retrieve_documents(state: FinancialAgentState) -> Dict[str, Any]:
     Returns:
         Dict with retrieved_docs list
     """
-    if not state.is_financial or not state.needs_secfiling or not state.ticker:
+    if not state.is_financial or not state.needs_secfiling:
+        logger.info(f"Skipping document retrieval - is_financial: {state.is_financial}, needs_secfiling: {state.needs_secfiling}")
         return {"retrieved_docs": []}
     
-    retriever = get_retriever()
-    
-    # Filter documents by requested tickers
-    ticker_filter = {"company_ticker": {"$in": state.ticker}}
-    
     try:
-        docs = retriever.invoke(state.query, filter=ticker_filter)
-    except Exception:
-        # Fallback without filter if it fails
-        docs = retriever.invoke(state.query)
-        docs = [d for d in docs if d.metadata.get("company_ticker") in state.ticker]
+        # Build retrieval filters and strategy
+        search_kwargs: Dict[str, Any] = {"k": 8, "fetch_k": 40, "lambda_mult": 0.35}
+        # Metadata filter by ticker if provided
+        if state.ticker:
+            tickers_upper = [t.upper() for t in state.ticker]
+            if len(tickers_upper) == 1:
+                search_kwargs["filter"] = {"company_ticker": tickers_upper[0]}
+            else:
+                search_kwargs["filter"] = {"company_ticker": {"$in": tickers_upper}}
+
+        retriever = get_retriever(search_type="mmr", search_kwargs=search_kwargs)
+        logger.info(f"Starting document retrieval with query: {state.query}")
+        
+        # Enhanced query with ticker context if available
+        query = state.query
+        if state.ticker:
+            # Add ticker names to help with retrieval
+            ticker_str = " ".join(state.ticker)
+            query = f"{state.query} {ticker_str}"
+            logger.info(f"Enhanced query with tickers: {query}")
+        
+        # Retrieve documents using standard LangChain API (prefer invoke per deprecation notice)
+        if hasattr(retriever, "invoke"):
+            docs = retriever.invoke(query)
+        elif hasattr(retriever, "get_relevant_documents"):
+            docs = retriever.get_relevant_documents(query)
+        else:
+            raise AttributeError("Retriever has no supported retrieval method (missing invoke and get_relevant_documents)")
+
+        # Ensure docs is a list
+        if docs is None:
+            docs = []
+        
+        try:
+            docs = list(docs)
+        except TypeError:
+            docs = [docs] if docs else []
+
+        logger.info(f"Retrieved {len(docs)} documents from retriever")
+        
+        # Optional: Filter by ticker/year if specified and results exist
+        if docs:
+            filtered = docs
+            if state.ticker:
+                tickers_upper = [t.upper() for t in state.ticker]
+                filtered = [d for d in filtered if d.metadata.get('company_ticker', '').upper() in tickers_upper]
+                if filtered:
+                    docs = filtered
+
+            # Year filter from query (e.g., 2024)
+            year = _extract_year(state.query)
+            if year:
+                filtered = [d for d in docs if year in str(d.metadata.get('period_end', ''))]
+                if filtered:
+                    docs = filtered
+
+            # Rerank to prefer informative sections
+            docs = _rerank_docs(docs)
+
+            # If top doc still looks uninformative, try a refined query
+            top_title = docs[0].metadata.get('section_title', '').lower() if docs else ''
+            if docs and any(key in top_title for key in ["signatures", "item 16"]):
+                refined = f"{state.query} Item 7 Management's Discussion and Analysis OR Item 1 Business OR Item 8 Financial Statements"
+                logger.info("Top result looked uninformative (Signatures/Item 16). Running refined retrieval.")
+                more = retriever.invoke(refined) if hasattr(retriever, 'invoke') else retriever.get_relevant_documents(refined)
+                if more:
+                    more = _rerank_docs(list(more))
+                    # Merge and keep unique by id if available
+                    seen_ids = set()
+                    merged: List[Any] = []
+                    for d in list(docs) + list(more):
+                        did = getattr(d, 'id', None) or d.metadata.get('source_file') or id(d)
+                        if did in seen_ids:
+                            continue
+                        seen_ids.add(did)
+                        merged.append(d)
+                    docs = merged[:8]
+        
+        # Log sample results for debugging
+        if docs:
+            sample = docs[0]
+            logger.info(f"Sample doc metadata: {sample.metadata}")
+            logger.info(f"Sample content preview: {sample.page_content[:200]}...")
+        else:
+            logger.warning("No documents retrieved - check if ChromaDB is populated")
+        
+        return {"retrieved_docs": docs}
+        
+    except Exception as e:
+        logger.error(f"Document retrieval failed: {e}", exc_info=True)
+        return {"retrieved_docs": []}
     
-    print(f"Retrieved {len(docs)} documents for {state.ticker}")
-    return {"retrieved_docs": docs}

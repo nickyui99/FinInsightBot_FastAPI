@@ -33,8 +33,6 @@ def generate_final_answer(state: FinancialAgentState) -> Dict[str, Any]:
     for ticker in state.ticker:
         f_data = state.fundamental_data.get(ticker, {})
         t_data = state.technical_data.get(ticker, {})
-
-        print("t_data", t_data)
         
         # Format fundamental analysis data
         if f_data and "error" not in str(f_data.get("error", "")):

@@ -1,6 +1,10 @@
 import os
 from pathlib import Path
 from typing import Set
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class Config:
     """Centralized configuration management"""

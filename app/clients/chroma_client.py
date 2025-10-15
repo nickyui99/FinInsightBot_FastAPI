@@ -17,7 +17,7 @@ from langchain.docstore.document import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 import os
-from app.config import EMBEDDING_MODEL, PERSIST_DIR
+from config import EMBEDDING_MODEL, PERSIST_DIR
 
 def create_vectorstore(documents: List[Document], persist_dir: str = PERSIST_DIR) -> Chroma:
     """

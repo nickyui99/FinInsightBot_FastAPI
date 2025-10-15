@@ -1,88 +1,130 @@
-# utils.py
+# doc_summarizer.py
 import os
+import sys
 from dotenv import load_dotenv
-from unstructured.partition.pdf import partition_pdf
-from unstructured.chunking.title import chunk_by_title
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
+import fitz  # PyMuPDF - faster than unstructured
+import re
+from typing import List, Dict
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pathlib import Path
-from config import GEMINI_FLASH_LITE
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 load_dotenv()
 
-# Initialize summarizer (Gemini 1.5 Flash is fast & cost-effective)
-summarizer = ChatGoogleGenerativeAI(
-    model= GEMINI_FLASH_LITE,
-    google_api_key=os.getenv("GOOGLE_API_KEY"),
-    temperature=0.3,
-    max_tokens=500
+# Text splitter for chunking (no summarization for speed)
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1500,
+    chunk_overlap=200,
+    separators=["\n\n", "\n", ". ", " ", ""]
 )
 
-# Summarization prompt tailored for SEC filings
-summary_prompt = PromptTemplate.from_template(
-    """You are a financial analyst. Summarize the following section from a SEC 10-K or 10-Q filing.
-Focus on key facts, risks, trends, and material information. Be concise and professional.
-
-Section title: {section_title}
-Section content:
-{content}
-
-Summary (3-5 sentences):"""
-)
-
-summarize_chain = summary_prompt | summarizer | StrOutputParser()
-
-def extract_summarize_and_chunk_pdf(pdf_path):
+def extract_summarize_and_chunk_pdf(pdf_path: str) -> List[Dict]:
     """
-    Returns list of summarized chunks with section-aware metadata
+    Fast extraction using PyMuPDF with intelligent section detection.
+    No LLM summarization - direct chunking for speed.
+    
+    Returns list of chunks with section metadata.
     """
-    # Step 1: Extract structured elements
-    elements = partition_pdf(
-        filename=pdf_path,
-        strategy="fast",
-        infer_table_structure=True
-    )
+    print(f"   📖 Extracting text from PDF...")
     
-    # Step 2: Group into semantic sections (e.g., "Item 1A. Risk Factors")
-    sections = chunk_by_title(elements, max_characters=3000, combine_text_under_n_chars=800)
+    # Step 1: Fast text extraction with PyMuPDF
+    doc = fitz.open(pdf_path)
+    page_count = len(doc)  # Get page count before closing
+    full_text = ""
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+    doc.close()
     
-    summarized_chunks = []
+    if not full_text.strip():
+        print(f"   ⚠️  PDF appears to be empty or image-based")
+        return []
     
-    for section in sections:
-        raw_text = str(section)
-        if len(raw_text.strip()) < 200:  # Skip tiny sections
-            continue
+    print(f"   ✅ Extracted {len(full_text):,} characters from {page_count} pages")
+    
+    # Step 2: Detect SEC filing sections with flexible patterns
+    section_patterns = [
+        # Standard SEC patterns
+        r"(?:^|\n)\s*Item\s+(\d+[A-Z]?)\.\s+([^\n]{5,100})",  # Item 1. Business
+        r"(?:^|\n)\s*ITEM\s+(\d+[A-Z]?)\.\s+([^\n]{5,100})",  # ITEM 1. BUSINESS
+        r"(?:^|\n)\s*Part\s+([IVX]+)\s*[:\-]\s*([^\n]{5,100})",  # Part I - Description
+        r"(?:^|\n)\s*Table of Contents",  # TOC marker
+    ]
+    
+    # Find all section markers
+    section_matches = []
+    for pattern in section_patterns[:2]:  # Focus on Item patterns
+        matches = list(re.finditer(pattern, full_text, re.MULTILINE | re.IGNORECASE))
+        if matches:
+            for match in matches:
+                section_matches.append({
+                    'start': match.start(),
+                    'item': match.group(1) if len(match.groups()) >= 1 else "0",
+                    'title': match.group(2).strip() if len(match.groups()) >= 2 else "Section"
+                })
+    
+    # Sort by position in document
+    section_matches = sorted(section_matches, key=lambda x: x['start'])
+    
+    print(f"   ✅ Detected {len(section_matches)} sections")
+    
+    # Step 3: Split document by sections or chunk intelligently
+    if len(section_matches) >= 2:
+        # We have clear sections - split by them
+        chunks_with_metadata = []
+        
+        for i, section in enumerate(section_matches):
+            start_pos = section['start']
+            end_pos = section_matches[i + 1]['start'] if i + 1 < len(section_matches) else len(full_text)
             
-        # Try to get section title (Unstructured often captures this)
-        section_title = getattr(section, 'title', 'Unknown Section')
-        if not section_title or len(section_title) > 100:
-            # Fallback: extract first line as title
-            section_title = raw_text[:80].split('\n')[0][:60] + "..."
-
-        try:
-            # Step 3: Summarize the section
-            summary = summarize_chain.invoke({
-                "section_title": section_title,
-                "content": raw_text[:4000]  # Cap to avoid token limits
-            })
+            section_text = full_text[start_pos:end_pos].strip()
+            section_title = f"Item {section['item']}: {section['title']}"
             
-            summarized_chunks.append({
-                "summary": summary,
-                "original_length": len(raw_text),
-                "section_title": section_title
-            })
+            # Skip very short sections
+            if len(section_text) < 300:
+                continue
             
-        except Exception as e:
-            print(f"⚠️ Summarization failed for section in {pdf_path}: {e}")
-            # Fallback: use original text if summarization fails
-            summarized_chunks.append({
-                "summary": raw_text[:1000],
-                "original_length": len(raw_text),
-                "section_title": section_title
-            })
+            # Chunk this section if too long
+            if len(section_text) > 2000:
+                sub_chunks = text_splitter.split_text(section_text)
+                for j, chunk in enumerate(sub_chunks):
+                    chunks_with_metadata.append({
+                        "summary": chunk,
+                        "original_length": len(section_text),
+                        "section_title": f"{section_title} (Part {j+1}/{len(sub_chunks)})"
+                    })
+            else:
+                chunks_with_metadata.append({
+                    "summary": section_text,
+                    "original_length": len(section_text),
+                    "section_title": section_title
+                })
+        
+        if chunks_with_metadata:
+            print(f"   ✅ Created {len(chunks_with_metadata)} section-based chunks")
+            return chunks_with_metadata
     
-    return summarized_chunks
+    # Fallback: No clear sections found - intelligent chunking
+    print(f"   ⚠️  No clear sections detected, using intelligent chunking")
+    chunks = text_splitter.split_text(full_text)
+    
+    chunks_with_metadata = []
+    for i, chunk in enumerate(chunks):
+        # Try to extract a title from first line
+        first_line = chunk.split('\n')[0][:80].strip()
+        title = first_line if len(first_line) > 10 else f"Section {i+1}"
+        
+        chunks_with_metadata.append({
+            "summary": chunk,
+            "original_length": len(chunk),
+            "section_title": title
+        })
+    
+    print(f"   ✅ Created {len(chunks_with_metadata)} intelligent chunks")
+    return chunks_with_metadata
 
 def parse_metadata_from_filename(filename):
     stem = Path(filename).stem
